@@ -31,7 +31,10 @@ CHUNK_SIZE=4
 #If not set, curl will be searched into the $PATH
 #CURL_BIN="/usr/bin/curl"
 
-#Default values
+#Executable for zipshare command
+ZIP_BIN=zip
+
+#Temporary folder
 TMP_DIR="/tmp"
 DEBUG=0
 QUIET=0
@@ -133,6 +136,10 @@ function remove_temp_files
         rm -fr "$RESPONSE_FILE"
         rm -fr "$CHUNK_FILE"
     fi
+
+    if [ -n "$ZIP_TMP_DIR" ]; then
+        rm -fr "$ZIP_TMP_DIR"
+    fi
 }
 
 #Returns the file size in bytes
@@ -177,6 +184,7 @@ function usage
     echo -e "\t mkdir    [REMOTE_DIR]"
     echo -e "\t list     <REMOTE_DIR>"
     echo -e "\t share    [REMOTE_FILE]"
+    echo -e "\t zipshare [LOCAL_FILE/DIR] [LOCAL_FILE/DIR] .."
     echo -e "\t info"
     echo -e "\t unlink"
 
@@ -257,6 +265,25 @@ function urlencode
         case "$c" in
             [-_.~a-zA-Z0-9] ) o="${c}" ;;
             * )               printf -v o '%%%02x' "'$c"
+        esac
+        encoded+="${o}"
+    done
+
+    echo "$encoded"
+}
+
+# As above, but replace with '_' iso. encoding it
+function convert_path_name
+{
+    local string="${1}"
+    local strlen=${#string}
+    local encoded=""
+
+    for (( pos=0 ; pos<strlen ; pos++ )); do
+        c=${string:$pos:1}
+        case "$c" in
+            [-_.~a-zA-Z0-9] ) o="${c}" ;;
+            * )               o="_"
         esac
         encoded+="${o}"
     done
@@ -845,6 +872,59 @@ function db_share
     fi
 }
 
+#Zip paths given as arguments (and set $FILE_SRC to the zipped file)
+#$@ = program arguments (*all* of them, b/c we need to handle spaces)
+function zipit
+{
+    ZIP_TMP_DIR=$TMP_DIR/zip.$RANDOM
+    local args=("${@}")
+    args=("${args[@]:1}")
+
+    # Do we have zip?
+    which $ZIP_BIN > /dev/null
+    if [ $? -ne 0 ]; then
+        echo -e "Error: You need the 'zip' executable on your \$PATH"
+        remove_temp_files
+        exit 1
+    fi
+
+    # We will put the zip file here
+    mkdir "$ZIP_TMP_DIR"
+
+    # Ask user for a better archive name
+    if [ ${BASH_VERSINFO[0]} -ge 4 ]; then
+        read -e -p "Enter name for archive: " -i "$(convert_path_name "${args[0]}").zip" ZIP_NAME
+    else
+        # Non-fancy prompt (no read -i) for older bash
+        ZIP_NAME=$(convert_path_name "${args[0]}").zip
+        read -e -p "Enter name for archive (or leave empty for default: \"$ZIP_NAME\"): " ZIP_READ
+        if [ -n "$ZIP_READ" ]; then
+            ZIP_NAME=$ZIP_READ
+        fi
+    fi
+
+    if [ -z "$ZIP_NAME" ]; then
+        echo -e "Error: not a valid archive name ($ZIP_NAME)!"
+        remove_temp_files
+        exit 1
+    fi
+
+    local ZIP_FILE=$ZIP_TMP_DIR/$ZIP_NAME
+
+    # Zip it (redirect output to stderr)
+    echo -e " > Zipping..." >&2
+    $ZIP_BIN -r "$ZIP_FILE" "${args[@]}" >&2
+
+    if [ $? -ne 0 ]; then
+        print " > FAILED\n"
+        print "   Error occurred while running zip\n"
+        remove_temp_files
+        exit 1
+    fi
+
+    FILE_SRC="$ZIP_FILE"
+}
+
 ################
 #### SETUP  ####
 ################
@@ -1104,6 +1184,19 @@ case $COMMAND in
     unlink)
 
         db_unlink
+
+    ;;
+
+    zipshare)
+
+        zipit "${@}"
+
+        # $FILE_SRC set by zipit
+        FILE_DST=/$(basename "$FILE_SRC")
+
+        db_upload "$FILE_SRC" "$FILE_DST"
+
+        db_share "$FILE_DST"
 
     ;;
 
